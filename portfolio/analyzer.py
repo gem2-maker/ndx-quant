@@ -75,8 +75,6 @@ class PortfolioAnalyzer:
 
     def sector_breakdown(self, tickers: list[str]) -> dict[str, list[str]]:
         """Group tickers by sector (basic mapping)."""
-        from data import SECTOR_MAP if hasattr(__import__('data'), 'SECTOR_MAP') else {}
-        # Simple reverse lookup
         result = {"other": []}
         sector_map = {
             "tech": ["AAPL", "MSFT", "NVDA", "AMD", "INTC", "QCOM", "TXN", "ADI",

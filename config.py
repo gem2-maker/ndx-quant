@@ -28,3 +28,12 @@ SMA_SHORT = 20
 SMA_LONG = 50
 EMA_SHORT = 12
 EMA_LONG = 26
+
+# ML / Prediction
+ML_MODEL_TYPE = "xgboost"       # "xgboost" | "random_forest" | "gradient_boosting"
+ML_LOOKBACK = 20                # Rolling window for features
+ML_FORECAST_HORIZON = 5         # Bars ahead to predict
+ML_TEST_SIZE = 0.2              # Test set fraction
+ML_N_ESTIMATORS = 200           # Number of trees
+ML_MAX_DEPTH = 6                # Tree depth
+MODEL_DIR = "models"

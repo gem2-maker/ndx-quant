@@ -3,12 +3,14 @@
 from strategies.momentum import MomentumStrategy, PriceMomentumStrategy
 from strategies.mean_reversion import MeanReversionStrategy
 from strategies.rsi_macd import RsiMacdStrategy
+from strategies.ml_signal import MLSignalStrategy
 
 STRATEGIES = {
     "momentum": MomentumStrategy,
     "price_momentum": PriceMomentumStrategy,
     "mean_reversion": MeanReversionStrategy,
     "rsi_macd": RsiMacdStrategy,
+    "ml_signal": MLSignalStrategy,
 }
 
 

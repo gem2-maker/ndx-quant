@@ -15,14 +15,21 @@ except ImportError:
     yf = None
 
 from config import DATA_DIR, DEFAULT_PERIOD, DEFAULT_INTERVAL
+from data.cache import DataCache
 
 
 class DataFetcher:
-    """Fetch and cache stock price data."""
+    """Fetch and cache stock price data.
 
-    def __init__(self, cache_dir: str = DATA_DIR):
+    Uses SQLite cache by default (data/cache/market_data.db).
+    Falls back to parquet files if SQLite cache is not available.
+    """
+
+    def __init__(self, cache_dir: str = DATA_DIR, use_sqlite: bool = True):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(exist_ok=True)
+        self.use_sqlite = use_sqlite
+        self._db_cache = DataCache() if use_sqlite else None
 
     def _cache_path(self, ticker: str, period: str, interval: str) -> Path:
         key = hashlib.md5(f"{ticker}_{period}_{interval}".encode()).hexdigest()[:12]
@@ -45,16 +52,31 @@ class DataFetcher:
         if yf is None:
             raise ImportError("yfinance not installed. Run: pip install yfinance")
 
+        # Try SQLite cache first
+        if use_cache and self._db_cache is not None:
+            cached = self._db_cache.get(ticker, period, interval)
+            if cached is not None:
+                self._db_cache.log_fetch(ticker, period, "sqlite", 0, len(cached), cache_hit=True)
+                return cached
+
+        # Fall back to parquet cache
         cache_path = self._cache_path(ticker, period, interval)
         if use_cache and self._is_fresh(cache_path):
-            return pd.read_parquet(cache_path)
+            df = pd.read_parquet(cache_path)
+            # Migrate to SQLite if available
+            if self._db_cache is not None:
+                self._db_cache.set(ticker, period, interval, df)
+            return df
 
+        t0 = time.time()
         print(f"  Fetching {ticker}...")
         stock = yf.Ticker(ticker)
         df = stock.history(period=period, interval=interval)
 
         if df.empty:
             print(f"  WARNING: No data for {ticker}")
+            if self._db_cache is not None:
+                self._db_cache.log_fetch(ticker, period, "yfinance", int((time.time()-t0)*1000), 0, error="empty")
             return df
 
         # Clean up
@@ -64,8 +86,16 @@ class DataFetcher:
             if col in df.columns:
                 df.drop(columns=[col], inplace=True)
 
-        # Cache
-        df.to_parquet(cache_path)
+        duration_ms = int((time.time() - t0) * 1000)
+
+        # Store in SQLite cache
+        if self._db_cache is not None:
+            self._db_cache.set(ticker, period, interval, df)
+            self._db_cache.log_fetch(ticker, period, "yfinance", duration_ms, len(df))
+        else:
+            # Fall back to parquet
+            df.to_parquet(cache_path)
+
         return df
 
     def fetch_multiple(
