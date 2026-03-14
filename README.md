@@ -31,23 +31,13 @@ python main.py analyze
 
 ```
 ndx-quant/
-├── data/
-│   ├── fetcher.py      # Price data fetching & caching
-│   └── constituents.py # NDX-100 stock list
-├── indicators/
-│   └── technical.py    # Technical analysis indicators
-├── strategies/
-│   ├── base.py         # Base strategy class
-│   ├── momentum.py     # Momentum strategy
-│   ├── mean_reversion.py # Mean reversion strategy
-│   └── rsi_macd.py     # RSI + MACD combo
-├── backtest/
-│   └── engine.py       # Backtesting engine
-├── portfolio/
-│   └── analyzer.py     # Portfolio risk & analysis
-├── config.py           # Configuration
-├── main.py             # CLI entry point
-└── requirements.txt
+├── data/           # Price data fetching & caching
+├── indicators/     # Technical analysis indicators
+├── strategies/     # Trading strategies
+├── backtest/       # Backtesting engine
+├── portfolio/      # Portfolio risk & analysis
+├── config.py       # Configuration
+└── main.py         # CLI entry point
 ```
 
 ## Disclaimer
@@ -55,4 +45,4 @@ ndx-quant/
 This is an educational/research tool. Not financial advice. Past performance does not guarantee future results.
 
 ---
-Built with 💎 by OpenClaw
+Built by [宝石GEM](https://github.com/gem2-maker) 💎
