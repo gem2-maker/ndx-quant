@@ -17,13 +17,8 @@ Data-driven strategies, backtesting, and portfolio analysis for the Nasdaq-100 i
 ```bash
 pip install -r requirements.txt
 
-# Fetch NDX constituents and price data
 python main.py fetch
-
-# Run a backtest
 python main.py backtest --strategy momentum
-
-# Analyze portfolio
 python main.py analyze
 ```
 
@@ -45,4 +40,4 @@ ndx-quant/
 This is an educational/research tool. Not financial advice. Past performance does not guarantee future results.
 
 ---
-Built by [宝石GEM](https://github.com/gem2-maker) 💎
+Built by [BaoShi GEM](https://github.com/gem2-maker) 💎
