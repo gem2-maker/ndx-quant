@@ -4,6 +4,7 @@ from strategies.momentum import MomentumStrategy, PriceMomentumStrategy
 from strategies.mean_reversion import MeanReversionStrategy
 from strategies.rsi_macd import RsiMacdStrategy
 from strategies.ml_signal import MLSignalStrategy
+from strategies.livermore_v3 import LivermoreV3Strategy, LivermoreV3Engine
 
 STRATEGIES = {
     "momentum": MomentumStrategy,
@@ -11,6 +12,7 @@ STRATEGIES = {
     "mean_reversion": MeanReversionStrategy,
     "rsi_macd": RsiMacdStrategy,
     "ml_signal": MLSignalStrategy,
+    "livermore_v3": LivermoreV3Strategy,
 }
 
 
