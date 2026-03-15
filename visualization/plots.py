@@ -243,9 +243,13 @@ class BacktestVisualizer:
                        color=STYLE["bear_color"], s=60, zorder=5, label=f"Sells ({len(sells)})")
 
         # Stats box
-        total_return = result.total_return
+        metrics = result.metrics
         final_eq = eq.iloc[-1]
-        textstr = f"Return: {total_return:+.1%}\nFinal: ${final_eq:,.0f}"
+        textstr = (
+            f"Return: {metrics['total_return']:+.1%}\n"
+            f"Final: ${final_eq:,.0f}\n"
+            f"Sharpe: {metrics['sharpe_ratio']:.2f} | Max DD: {metrics['max_drawdown']:.1%}"
+        )
         props = dict(boxstyle="round,pad=0.5", facecolor=STYLE["bg_color"],
                      edgecolor=STYLE["grid_color"], alpha=0.9)
         ax.text(0.02, 0.95, textstr, transform=ax.transAxes, fontsize=9,
@@ -331,16 +335,8 @@ class BacktestVisualizer:
         """Plot trade PnL distribution and statistics."""
         _apply_style(ax, title="Trade Analysis", xlabel="Trade #", ylabel="PnL ($)")
 
-        # Extract trade PnL (pair buys with sells)
-        pnls = []
-        buy_queue = []
-        for t in result.trades:
-            if t.action == "BUY":
-                buy_queue.append(t)
-            elif t.action == "SELL" and buy_queue:
-                buy = buy_queue.pop(0)
-                pnl = (t.price - buy.price) * t.shares - t.commission - buy.commission
-                pnls.append(pnl)
+        completed = result.completed_trades
+        pnls = [trade.net_pnl for trade in completed]
 
         if not pnls:
             ax.text(0.5, 0.5, "No completed trades", transform=ax.transAxes,
@@ -353,17 +349,19 @@ class BacktestVisualizer:
         ax.axhline(y=0, color=STYLE["text_color"], linewidth=0.5, alpha=0.3)
 
         # Stats
-        wins = [p for p in pnls if p >= 0]
+        wins = [p for p in pnls if p > 0]
         losses = [p for p in pnls if p < 0]
-        win_rate = len(wins) / len(pnls) * 100
+        metrics = result.metrics
+        avg_return = np.mean([trade.return_pct for trade in completed]) if completed else 0
+        avg_hold = np.mean([trade.hold_period_days for trade in completed]) if completed else 0
         avg_win = np.mean(wins) if wins else 0
         avg_loss = np.mean(losses) if losses else 0
         total_pnl = sum(pnls)
 
-        textstr = (f"Trades: {len(pnls)} | Win: {win_rate:.0f}%\n"
+        textstr = (f"Trades: {len(pnls)} | Win: {metrics['win_rate']:.0%}\n"
                    f"Avg Win: ${avg_win:,.0f} | Avg Loss: ${avg_loss:,.0f}\n"
-                   f"Total PnL: ${total_pnl:,.0f} | "
-                   f"Profit Factor: {abs(sum(wins)/sum(losses)) if losses else float('inf'):.2f}")
+                   f"Total PnL: ${total_pnl:,.0f} | Profit Factor: {metrics['profit_factor']:.2f}\n"
+                   f"Avg Return: {avg_return:.1%} | Avg Hold: {avg_hold:.1f}d")
         props = dict(boxstyle="round,pad=0.5", facecolor=STYLE["bg_color"],
                      edgecolor=STYLE["grid_color"], alpha=0.9)
         ax.text(0.02, 0.95, textstr, transform=ax.transAxes, fontsize=8,

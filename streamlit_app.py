@@ -101,40 +101,31 @@ def compute_backtest(
 
 
 def summarize_backtest(result: BacktestResult) -> dict[str, float]:
-    eq = result.equity_curve
-    daily_returns = eq.pct_change().dropna()
-    max_drawdown = ((eq / eq.cummax()) - 1).min() if not eq.empty else 0.0
-    sharpe = 0.0
-    if not daily_returns.empty and daily_returns.std() > 0:
-        sharpe = (daily_returns.mean() / daily_returns.std()) * (252 ** 0.5)
-
-    commissions = sum(trade.commission for trade in result.trades)
-    buys = sum(1 for trade in result.trades if trade.action == "BUY")
-    sells = sum(1 for trade in result.trades if trade.action == "SELL")
-
-    return {
-        "final_equity": float(eq.iloc[-1]) if not eq.empty else 0.0,
-        "total_return": float(result.total_return),
-        "max_drawdown": float(max_drawdown),
-        "sharpe": float(sharpe),
-        "win_rate": float(result.win_rate),
-        "buy_trades": buys,
-        "sell_trades": sells,
-        "commission": float(commissions),
-    }
+    metrics = result.metrics.copy()
+    metrics["sharpe"] = metrics["sharpe_ratio"]
+    metrics["commission"] = metrics["total_commission"]
+    return metrics
 
 
 def build_trade_frame(result: BacktestResult) -> pd.DataFrame:
     records = [
         {
-            "date": trade.date,
-            "action": trade.action,
+            "entry_date": trade.entry_date,
+            "exit_date": trade.exit_date,
+            "hold_days": trade.hold_period_days,
+            "hold_bars": trade.hold_period_bars,
             "shares": trade.shares,
-            "price": trade.price,
-            "commission": trade.commission,
-            "reason": trade.reason,
+            "entry_price": trade.entry_price,
+            "exit_price": trade.exit_price,
+            "gross_pnl": trade.gross_pnl,
+            "net_pnl": trade.net_pnl,
+            "return_pct": trade.return_pct,
+            "mfe_pct": trade.max_favorable_excursion_pct,
+            "mae_pct": trade.max_adverse_excursion_pct,
+            "commission": trade.total_commission,
+            "exit_reason": trade.exit_reason,
         }
-        for trade in result.trades
+        for trade in result.completed_trades
     ]
     return pd.DataFrame(records)
 
@@ -282,6 +273,13 @@ def render_backtest_tab(df: pd.DataFrame, controls: dict[str, object]) -> None:
     cols[3].metric("Max drawdown", format_pct(summary["max_drawdown"]))
     cols[4].metric("Win rate", format_pct(summary["win_rate"]))
 
+    detail_cols = st.columns(5)
+    detail_cols[0].metric("Profit factor", f"{summary['profit_factor']:.2f}")
+    detail_cols[1].metric("Expectancy", f"${summary['expectancy']:,.0f}")
+    detail_cols[2].metric("Avg trade", f"${summary['average_trade_pnl']:,.0f}")
+    detail_cols[3].metric("Avg hold", f"{summary['average_hold_days']:.1f}d")
+    detail_cols[4].metric("Exposure", format_pct(summary["exposure_ratio"]))
+
     st.pyplot(plot_equity_panel(result, controls["ticker"], df), use_container_width=True)
 
     trade_df = build_trade_frame(result)
@@ -290,12 +288,18 @@ def render_backtest_tab(df: pd.DataFrame, controls: dict[str, object]) -> None:
         st.markdown(f"**Strategy:** `{strategy.name}`")
         st.markdown(f"**Buy trades:** `{summary['buy_trades']}`")
         st.markdown(f"**Sell trades:** `{summary['sell_trades']}`")
+        st.markdown(f"**Completed trades:** `{summary['completed_trades']}`")
         st.markdown(f"**Commission paid:** `${summary['commission']:,.2f}`")
+        st.markdown(f"**Best / Worst trade:** `${summary['best_trade']:,.0f}` / `${summary['worst_trade']:,.0f}`")
+        st.markdown(f"**Consecutive wins / losses:** `{summary['max_consecutive_wins']}` / `{summary['max_consecutive_losses']}`")
         if hasattr(strategy, "training_info"):
             st.json(strategy.training_info)
     with trade_col:
-        st.subheader("Trade blotter")
-        st.dataframe(trade_df.sort_values("date", ascending=False) if not trade_df.empty else trade_df, use_container_width=True)
+        st.subheader("Completed trades")
+        st.dataframe(
+            trade_df.sort_values("exit_date", ascending=False) if not trade_df.empty else trade_df,
+            use_container_width=True,
+        )
 
 
 def render_risk_tab(controls: dict[str, object]) -> None:
