@@ -124,18 +124,30 @@ class TrendPredictor:
         else:
             raise ValueError(f"Unknown model type: {self.model_type}")
 
-    def train(self, df: pd.DataFrame) -> TrainingResult:
-        """Train the prediction model.
+    def build_feature_frame(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Build the full featured DataFrame once for reuse."""
+        return self.feature_engineer.build_features(df)
 
-        Args:
-            df: OHLCV DataFrame (from DataFetcher).
-
-        Returns:
-            TrainingResult with metrics.
-        """
-        # Build features
-        featured_df = self.feature_engineer.build_features(df)
+    def prepare_feature_matrix(
+        self,
+        featured_df: pd.DataFrame,
+        feature_names: Optional[list[str]] = None,
+    ) -> tuple[pd.DataFrame, pd.Series]:
+        """Extract X/y and align columns to a trained model when needed."""
         X, y = self.feature_engineer.get_X_y(featured_df)
+
+        if feature_names:
+            X = X.reindex(columns=feature_names, fill_value=0.0)
+
+        return X, y
+
+    def train_from_featured_df(self, featured_df: pd.DataFrame) -> TrainingResult:
+        """Train the prediction model from a precomputed feature table."""
+        X, y = self.prepare_feature_matrix(featured_df)
+        return self.train_from_matrix(X, y)
+
+    def train_from_matrix(self, X: pd.DataFrame, y: pd.Series) -> TrainingResult:
+        """Train the prediction model from an aligned feature matrix."""
 
         if len(X) < 50:
             raise ValueError(f"Not enough data: {len(X)} samples (need >= 50)")
@@ -191,6 +203,18 @@ class TrendPredictor:
             n_test_samples=len(X_test),
         )
 
+    def train(self, df: pd.DataFrame) -> TrainingResult:
+        """Train the prediction model.
+
+        Args:
+            df: OHLCV DataFrame (from DataFetcher).
+
+        Returns:
+            TrainingResult with metrics.
+        """
+        featured_df = self.build_feature_frame(df)
+        return self.train_from_featured_df(featured_df)
+
     def predict(self, df: pd.DataFrame, top_n: int = 5) -> list[PredictionResult]:
         """Predict trend for the most recent data points.
 
@@ -204,8 +228,8 @@ class TrendPredictor:
         if not self._trained:
             raise RuntimeError("Model not trained. Call train() first.")
 
-        featured_df = self.feature_engineer.build_features(df)
-        X, _ = self.feature_engineer.get_X_y(featured_df)
+        featured_df = self.build_feature_frame(df)
+        X, _ = self.prepare_feature_matrix(featured_df, self.feature_names)
 
         if X.empty:
             return []

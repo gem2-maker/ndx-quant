@@ -126,6 +126,8 @@ class LivermoreV3Strategy(BaseStrategy):
         self._ml_loaded = False
         self._prediction_cache = {}  # idx -> ml_score
         self._last_retrain_bar = 0
+        self._ml_feature_matrix = None
+        self._ml_target_vector = None
 
     def _value_score(self, df: pd.DataFrame, idx: int) -> float:
         """Calculate value score (0 = expensive, 1 = cheap)."""
@@ -290,6 +292,72 @@ class LivermoreV3Strategy(BaseStrategy):
             print(f"  [V3] ML model load failed: {e}, ML score disabled")
             self._predictor = None
 
+    def _prepare_ml_features(self, df: pd.DataFrame):
+        """Pre-compute aligned ML features once per backtest run."""
+        self._prediction_cache.clear()
+        self._last_retrain_bar = 0
+        self._ml_feature_matrix = None
+        self._ml_target_vector = None
+
+        self._load_ml_model()
+
+        if self._predictor is None or not self._predictor._trained:
+            return
+
+        try:
+            featured_df = self._predictor.build_feature_frame(df)
+            X, y = self._predictor.prepare_feature_matrix(
+                featured_df,
+                self._predictor.feature_names or None,
+            )
+
+            bar_positions = pd.Series(np.arange(len(df)), index=df.index)
+            aligned_positions = bar_positions.reindex(featured_df.index)
+            valid_rows = aligned_positions.notna()
+
+            if not valid_rows.any():
+                return
+
+            X = X.loc[valid_rows].copy()
+            y = y.loc[valid_rows].copy()
+            X.index = aligned_positions.loc[valid_rows].astype(int)
+            y.index = X.index
+            self._ml_feature_matrix = X
+            self._ml_target_vector = y
+        except Exception as e:
+            print(f"  [V3] ML feature pre-compute failed: {e}, ML score disabled")
+            self._ml_feature_matrix = None
+            self._ml_target_vector = None
+
+    def _retrain_ml_model(self, df: pd.DataFrame, idx: int):
+        """Retrain the model on a walk-forward schedule using precomputed features."""
+        if not self.walk_forward or self._predictor is None:
+            return
+
+        if idx - self._last_retrain_bar < self.retrain_interval:
+            return
+
+        train_end_idx = idx - self._predictor.forecast_horizon
+        if (
+            train_end_idx < 0
+            or self._ml_feature_matrix is None
+            or self._ml_target_vector is None
+        ):
+            return
+
+        train_rows = self._ml_feature_matrix.index <= train_end_idx
+        if int(train_rows.sum()) < 50:
+            return
+
+        try:
+            X_train = self._ml_feature_matrix.loc[train_rows]
+            y_train = self._ml_target_vector.loc[train_rows]
+            self._predictor.train_from_matrix(X_train, y_train)
+        except Exception:
+            return
+
+        self._last_retrain_bar = idx
+
     def _ml_score(self, df: pd.DataFrame, idx: int) -> float:
         """Calculate ML score (0 = bearish, 0.5 = neutral, 1 = bullish).
 
@@ -301,24 +369,20 @@ class LivermoreV3Strategy(BaseStrategy):
 
         self._load_ml_model()
 
-        if self._predictor is None or not self._predictor._trained:
+        if (
+            self._predictor is None
+            or not self._predictor._trained
+            or self._ml_feature_matrix is None
+            or idx not in self._ml_feature_matrix.index
+        ):
             return 0.5  # neutral fallback
 
         try:
-            # Walk-forward retraining
-            if self.walk_forward and (idx - self._last_retrain_bar >= self.retrain_interval):
-                train_df = df.iloc[:idx + 1]
-                if len(train_df) > 200:
-                    self._predictor.train(train_df)
-                    self._last_retrain_bar = idx
+            self._retrain_ml_model(df, idx)
 
-            # Get prediction for this bar
-            window = df.iloc[:idx + 1]
-            preds = self._predictor.predict(window, top_n=1)
-            if preds:
-                score = preds[0].probability  # P(up) in [0, 1]
-            else:
-                score = 0.5
+            X_latest = self._ml_feature_matrix.loc[[idx]]
+            X_scaled = self._predictor.scaler.transform(X_latest)
+            score = float(self._predictor.model.predict_proba(X_scaled)[0][1])
         except Exception:
             score = 0.5
 
@@ -392,6 +456,8 @@ class LivermoreV3Engine:
         self.pyramid_min_score = pyramid_min_score
 
     def run(self, df: pd.DataFrame, ticker: str = "QQQ") -> dict:
+        self.strategy._prepare_ml_features(df)
+
         cash = self.initial_capital
         position = None
         trades = []
