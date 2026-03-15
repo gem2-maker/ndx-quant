@@ -37,3 +37,9 @@ ML_TEST_SIZE = 0.2              # Test set fraction
 ML_N_ESTIMATORS = 200           # Number of trees
 ML_MAX_DEPTH = 6                # Tree depth
 MODEL_DIR = "models"
+
+# GARCH / Volatility
+GARCH_MODEL_TYPE = "garch"      # "garch" | "gjr" | "egarch"
+GARCH_P = 1                     # ARCH order
+GARCH_Q = 1                     # GARCH order
+VOL_TARGET = 0.15               # Target annualized volatility for position sizing

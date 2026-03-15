@@ -20,7 +20,25 @@ pip install -r requirements.txt
 python main.py fetch
 python main.py backtest --strategy momentum
 python main.py analyze
+streamlit run streamlit_app.py
 ```
+
+## Dashboard
+
+Launch the interactive research dashboard with:
+
+```bash
+streamlit run streamlit_app.py
+```
+
+The dashboard includes:
+
+- Market view with price, Bollinger Bands, RSI, and MACD
+- Strategy backtesting with trade blotter and equity/drawdown charts
+- Risk metrics and correlation matrix
+- Momentum scan across the NDX universe or sector subsets
+- ML model training, recent predictions, and feature importance
+- Volatility regime analysis and position sizing guidance
 
 ## Project Structure
 

@@ -13,8 +13,11 @@ from indicators.technical import add_all_indicators
 from strategies import get_strategy, STRATEGIES
 from backtest.engine import BacktestEngine
 from portfolio.analyzer import PortfolioAnalyzer
-from ml import FeatureEngineer, TrendPredictor, ModelEvaluator
-from config import ML_MODEL_TYPE, ML_LOOKBACK, ML_FORECAST_HORIZON, ML_TEST_SIZE, ML_N_ESTIMATORS, ML_MAX_DEPTH
+from ml import FeatureEngineer, TrendPredictor, ModelEvaluator, VolatilityPredictor
+from config import (
+    ML_MODEL_TYPE, ML_LOOKBACK, ML_FORECAST_HORIZON, ML_TEST_SIZE,
+    ML_N_ESTIMATORS, ML_MAX_DEPTH, GARCH_MODEL_TYPE, GARCH_P, GARCH_Q, VOL_TARGET,
+)
 
 
 def cmd_fetch(args):
@@ -150,6 +153,68 @@ def cmd_backtest_ml(args):
 
     print(engine.summary(result, ticker))
     print(f"\nML Strategy Info: {strategy.training_info}")
+
+
+def cmd_volatility(args):
+    """Analyze volatility using GARCH model."""
+    fetcher = DataFetcher()
+    ticker = args.ticker or "QQQ"
+
+    print(f"Fitting {args.garch_model.upper()}({args.p},{args.q}) on {ticker}...\n")
+    df = fetcher.fetch(ticker, period=args.period)
+    if df.empty:
+        print(f"No data for {ticker}")
+        return
+
+    predictor = VolatilityPredictor(
+        model_type=args.garch_model,
+        p=args.p,
+        q=args.q,
+        vol_target=args.vol_target,
+    )
+    result = predictor.fit(df, ticker)
+    print(predictor.summary(result))
+
+
+def cmd_visualize(args):
+    """Generate backtest visualization report."""
+    from visualization.plots import BacktestVisualizer
+    from strategies.ml_signal import MLSignalStrategy
+
+    fetcher = DataFetcher()
+    ticker = args.ticker or "QQQ"
+
+    print(f"Generating {args.chart_type} chart for {ticker}...\n")
+    df = fetcher.fetch(ticker, period=args.period)
+    if df.empty:
+        print(f"No data for {ticker}")
+        return
+
+    df = add_all_indicators(df)
+
+    if args.strategy == "ml":
+        strategy = MLSignalStrategy(
+            model_type=args.model, lookback=ML_LOOKBACK,
+            forecast_horizon=ML_FORECAST_HORIZON,
+        )
+    else:
+        strategy = get_strategy(args.strategy)
+
+    engine = BacktestEngine(strategy)
+    result = engine.run(df, ticker)
+
+    viz = BacktestVisualizer(output_dir=args.output)
+
+    if args.chart_type == "full":
+        path = viz.full_report(result, ticker, df)
+    elif args.chart_type == "equity":
+        path = viz.equity_curve_only(result, ticker, df)
+    elif args.chart_type == "drawdown":
+        path = viz.drawdown_only(result, ticker)
+    else:
+        path = viz.full_report(result, ticker, df)
+
+    print(f"Chart saved to: {path}")
 
 
 def cmd_train(args):
@@ -296,6 +361,31 @@ def main():
     p_btml.add_argument("--n-estimators", type=int, default=ML_N_ESTIMATORS)
     p_btml.add_argument("--max-depth", type=int, default=ML_MAX_DEPTH)
 
+    # volatility
+    p_vol = sub.add_parser("volatility", help="Analyze volatility with GARCH")
+    p_vol.add_argument("ticker", nargs="?", help="Ticker symbol (default: QQQ)")
+    p_vol.add_argument("--period", default="2y", help="Data period")
+    p_vol.add_argument("--garch-model", default=GARCH_MODEL_TYPE,
+                       choices=["garch", "gjr", "egarch"])
+    p_vol.add_argument("--p", type=int, default=GARCH_P, help="ARCH order")
+    p_vol.add_argument("--q", type=int, default=GARCH_Q, help="GARCH order")
+    p_vol.add_argument("--vol-target", type=float, default=VOL_TARGET,
+                       help="Target annualized volatility for position sizing")
+
+    # visualize
+    p_viz = sub.add_parser("visualize", help="Generate backtest charts")
+    p_viz.add_argument("ticker", nargs="?", help="Ticker symbol (default: QQQ)")
+    p_viz.add_argument("--period", default="2y", help="Data period")
+    p_viz.add_argument("--strategy", "-s", default="momentum",
+                       choices=list(STRATEGIES.keys()) + ["ml"],
+                       help="Strategy to visualize")
+    p_viz.add_argument("--model", "-m", default=ML_MODEL_TYPE,
+                       choices=["xgboost", "random_forest", "gradient_boosting"])
+    p_viz.add_argument("--chart-type", default="full",
+                       choices=["full", "equity", "drawdown"],
+                       help="Chart type to generate")
+    p_viz.add_argument("--output", default="reports", help="Output directory")
+
     # cache
     p_cache = sub.add_parser("cache", help="Manage data cache")
     p_cache.add_argument("action", choices=["stats", "clear", "compact"],
@@ -318,6 +408,8 @@ def main():
         "train": cmd_train,
         "predict": cmd_predict,
         "backtest-ml": cmd_backtest_ml,
+        "volatility": cmd_volatility,
+        "visualize": cmd_visualize,
         "cache": cmd_cache,
     }
     commands[args.command](args)
