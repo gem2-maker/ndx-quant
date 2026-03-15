@@ -63,7 +63,7 @@ STOP_TIERS = [
 
 class LivermoreV3Strategy(BaseStrategy):
     """
-    Livermore v3: Value + Momentum + ML Composite Scoring.
+    Livermore v3: Value + Momentum + ML + Macro Composite Scoring.
 
     Value Score (0-1):
     - RSI: oversold = high score
@@ -80,6 +80,11 @@ class LivermoreV3Strategy(BaseStrategy):
     - Random Forest P(up) from trained model
     - 0.5 = neutral, >0.5 = bullish, <0.5 = bearish
     - Falls back to 0.5 if model unavailable
+
+    Macro Score (0-1):
+    - Risk regime overlay from optional macro columns
+    - Supports VIX, long yields, USD, and inflation proxies
+    - Falls back to 0.5 when macro data is unavailable
     """
 
     def __init__(
@@ -91,10 +96,12 @@ class LivermoreV3Strategy(BaseStrategy):
         vix_fear: float = 30.0,
         vix_extreme: float = 40.0,
         breakout_lookback: int = 20,
-        # 3-factor weights (sum to 1.0)
+        # 4-factor base weights (normalized internally)
         value_weight: float = 0.3,
         momentum_weight: float = 0.4,
         ml_weight: float = 0.3,
+        macro_weight: float = 0.2,
+        dynamic_weighting: bool = True,
         # Thresholds
         min_composite_score: float = 0.50,
         pe_cheap: float = 25.0,
@@ -115,6 +122,8 @@ class LivermoreV3Strategy(BaseStrategy):
         self.value_weight = value_weight
         self.momentum_weight = momentum_weight
         self.ml_weight = ml_weight
+        self.macro_weight = macro_weight
+        self.dynamic_weighting = dynamic_weighting
         self.min_composite_score = min_composite_score
         self.pe_cheap = pe_cheap
         self.pe_expensive = pe_expensive
@@ -128,6 +137,17 @@ class LivermoreV3Strategy(BaseStrategy):
         self._last_retrain_bar = 0
         self._ml_feature_matrix = None
         self._ml_target_vector = None
+
+    def _clamp_score(self, value: float) -> float:
+        return float(max(0.0, min(1.0, value)))
+
+    def _column_value(self, df: pd.DataFrame, idx: int, names: list[str]) -> float | None:
+        for name in names:
+            if name in df.columns:
+                value = df[name].iloc[idx]
+                if not pd.isna(value):
+                    return float(value)
+        return None
 
     def _value_score(self, df: pd.DataFrame, idx: int) -> float:
         """Calculate value score (0 = expensive, 1 = cheap)."""
@@ -241,6 +261,139 @@ class LivermoreV3Strategy(BaseStrategy):
                 scores.append(0.3)
 
         return np.mean(scores) if scores else 0.5
+
+    def _macro_score(self, df: pd.DataFrame, idx: int) -> float:
+        """Calculate macro score (0 = hostile macro regime, 1 = supportive macro regime)."""
+        scores = []
+
+        vix = self._column_value(df, idx, ["VIX"])
+        if vix is not None:
+            if vix <= 16:
+                scores.append(1.0)
+            elif vix <= 22:
+                scores.append(0.8)
+            elif vix <= self.vix_fear:
+                scores.append(0.6)
+            elif vix <= self.vix_extreme:
+                scores.append(0.35)
+            else:
+                scores.append(0.1)
+
+        yield_10y = self._column_value(df, idx, ["TNX", "US10Y", "DGS10", "UST10Y"])
+        if yield_10y is not None:
+            if yield_10y > 20:
+                yield_10y /= 10.0
+            if yield_10y <= 2.5:
+                rate_level_score = 1.0
+            elif yield_10y <= 3.5:
+                rate_level_score = 0.8
+            elif yield_10y <= 4.5:
+                rate_level_score = 0.5
+            else:
+                rate_level_score = 0.2
+
+            if idx >= 20:
+                prev_yield = self._column_value(df, idx - 20, ["TNX", "US10Y", "DGS10", "UST10Y"])
+                if prev_yield is not None:
+                    if prev_yield > 20:
+                        prev_yield /= 10.0
+                    delta = yield_10y - prev_yield
+                    trend_score = self._clamp_score(0.5 - delta / 2.0)
+                    scores.append((rate_level_score + trend_score) / 2.0)
+                else:
+                    scores.append(rate_level_score)
+            else:
+                scores.append(rate_level_score)
+
+        dxy = self._column_value(df, idx, ["DXY", "DX-Y.NYB", "USDX"])
+        if dxy is not None and idx >= 20:
+            prev_dxy = self._column_value(df, idx - 20, ["DXY", "DX-Y.NYB", "USDX"])
+            if prev_dxy is not None and prev_dxy > 0:
+                dxy_ret = (dxy - prev_dxy) / prev_dxy
+                scores.append(self._clamp_score(0.55 - dxy_ret * 5.0))
+
+        inflation = self._column_value(df, idx, ["CPI", "CPIAUCSL", "CORE_CPI", "PCEPI"])
+        if inflation is not None:
+            if inflation <= 2.5:
+                inflation_score = 1.0
+            elif inflation <= 3.5:
+                inflation_score = 0.75
+            elif inflation <= 5.0:
+                inflation_score = 0.45
+            else:
+                inflation_score = 0.15
+
+            if idx >= 3:
+                prev_inflation = self._column_value(df, idx - 3, ["CPI", "CPIAUCSL", "CORE_CPI", "PCEPI"])
+                if prev_inflation is not None:
+                    trend_score = self._clamp_score(0.5 + (prev_inflation - inflation) / 2.0)
+                    scores.append((inflation_score + trend_score) / 2.0)
+                else:
+                    scores.append(inflation_score)
+            else:
+                scores.append(inflation_score)
+
+        return float(np.mean(scores)) if scores else 0.5
+
+    def _factor_scores(self, df: pd.DataFrame, idx: int) -> dict[str, float]:
+        return {
+            "value": self._value_score(df, idx),
+            "momentum": self._momentum_score(df, idx),
+            "ml": self._ml_score(df, idx),
+            "macro": self._macro_score(df, idx),
+        }
+
+    def _factor_weights(self, factor_scores: dict[str, float]) -> dict[str, float]:
+        weights = {
+            "value": max(0.0, float(self.value_weight)),
+            "momentum": max(0.0, float(self.momentum_weight)),
+            "ml": max(0.0, float(self.ml_weight)),
+            "macro": max(0.0, float(self.macro_weight)),
+        }
+
+        if self.dynamic_weighting:
+            macro_score = factor_scores["macro"]
+            ml_score = factor_scores["ml"]
+            momentum_score = factor_scores["momentum"]
+            value_score = factor_scores["value"]
+
+            if macro_score >= 0.65:
+                weights["momentum"] *= 1.25
+                weights["ml"] *= 1.15
+                weights["value"] *= 0.90
+                weights["macro"] *= 0.85
+            elif macro_score <= 0.35:
+                weights["value"] *= 1.20
+                weights["macro"] *= 1.35
+                weights["momentum"] *= 0.80
+                weights["ml"] *= 0.75
+
+            for name, score in factor_scores.items():
+                weights[name] *= 0.75 + score
+
+            if abs(ml_score - 0.5) < 1e-9:
+                weights["ml"] *= 0.5
+
+            if macro_score < 0.4 and momentum_score < 0.4:
+                weights["momentum"] *= 0.8
+
+            if macro_score < 0.4 and value_score > 0.7:
+                weights["value"] *= 1.1
+
+        total = sum(weights.values())
+        if total <= 0:
+            return {name: 0.25 for name in weights}
+        return {name: weight / total for name, weight in weights.items()}
+
+    def _composite_state(self, df: pd.DataFrame, idx: int) -> dict[str, object]:
+        factor_scores = self._factor_scores(df, idx)
+        factor_weights = self._factor_weights(factor_scores)
+        composite = sum(factor_scores[name] * factor_weights[name] for name in factor_scores)
+        return {
+            "scores": factor_scores,
+            "weights": factor_weights,
+            "composite": float(composite),
+        }
 
     def _fib_entry_signal(self, df: pd.DataFrame, idx: int) -> bool:
         """Check if price is at a Fibonacci retracement level."""
@@ -405,13 +558,8 @@ class LivermoreV3Strategy(BaseStrategy):
             if not pd.isna(vix) and vix >= self.vix_extreme:
                 return Signal.BUY
 
-        # Calculate composite score (3-factor)
-        value = self._value_score(df, idx)
-        momentum = self._momentum_score(df, idx)
-        ml = self._ml_score(df, idx)
-        composite = (self.value_weight * value +
-                     self.momentum_weight * momentum +
-                     self.ml_weight * ml)
+        state = self._composite_state(df, idx)
+        composite = state["composite"]
 
         # Fibonacci entry check
         fib_signal = self._fib_entry_signal(df, idx)
@@ -517,12 +665,14 @@ class LivermoreV3Engine:
 
             # === Signal & scoring ===
             signal = self.strategy.generate_signal(df, i)
-            value_score = self.strategy._value_score(df, i)
-            momentum_score = self.strategy._momentum_score(df, i)
-            ml_score = self.strategy._ml_score(df, i)
-            composite = (self.strategy.value_weight * value_score +
-                        self.strategy.momentum_weight * momentum_score +
-                        self.strategy.ml_weight * ml_score)
+            factor_state = self.strategy._composite_state(df, i)
+            factor_scores = factor_state["scores"]
+            factor_weights = factor_state["weights"]
+            value_score = factor_scores["value"]
+            momentum_score = factor_scores["momentum"]
+            ml_score = factor_scores["ml"]
+            macro_score = factor_scores["macro"]
+            composite = factor_state["composite"]
 
             # Position size scales with composite score
             pos_scale = 0.5 + composite * 0.5  # 0.5x to 1.0x
@@ -548,7 +698,8 @@ class LivermoreV3Engine:
                                 "price": buy_price, "commission": comm,
                                 "reason": reason,
                                 "value": f"{value_score:.2f}", "momentum": f"{momentum_score:.2f}",
-                                "ml": f"{ml_score:.2f}",
+                                "ml": f"{ml_score:.2f}", "macro": f"{macro_score:.2f}",
+                                "weights": {k: round(v, 3) for k, v in factor_weights.items()},
                                 "composite": f"{composite:.2f}",
                             })
 
@@ -575,7 +726,8 @@ class LivermoreV3Engine:
                                 "avg_entry": position.avg_entry_price,
                                 "total_shares": position.total_shares,
                                 "value": f"{value_score:.2f}", "momentum": f"{momentum_score:.2f}",
-                                "ml": f"{ml_score:.2f}",
+                                "ml": f"{ml_score:.2f}", "macro": f"{macro_score:.2f}",
+                                "weights": {k: round(v, 3) for k, v in factor_weights.items()},
                                 "composite": f"{composite:.2f}",
                             })
 
@@ -647,7 +799,7 @@ class LivermoreV3Engine:
         eq = result["equity_curve"]
         return f"""
 {'='*55}
-Livermore V3 (Value + Momentum) on {ticker}
+Livermore V3 (Value + Momentum + ML + Macro) on {ticker}
 {'='*55}
 Period: {eq.index[0].strftime('%Y-%m-%d')} -> {eq.index[-1].strftime('%Y-%m-%d')}
 Initial: ${m['initial_equity']:,.0f} -> Final: ${m['final_equity']:,.0f}
