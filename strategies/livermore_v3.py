@@ -625,10 +625,16 @@ class LivermoreV3Engine:
 
                 drawdown = (low - position.highest_price) / position.highest_price
 
+                # Dynamic stop width based on macro regime
+                macro_now = self.strategy._macro_score(df, i)
+                # macro=1.0 → stop_mult=2.0 (wider), macro=0.5 → stop_mult=1.0 (normal), macro=0.0 → stop_mult=0.7 (tighter)
+                stop_mult = 0.7 + macro_now * 1.3
+
                 for tier_name, trigger_pct, sell_frac in STOP_TIERS:
                     if tier_name in position.stops_hit:
                         continue
-                    if drawdown <= trigger_pct:
+                    adjusted_trigger = trigger_pct * stop_mult
+                    if drawdown <= adjusted_trigger:
                         position.stops_hit.append(tier_name)
                         sell_shares = max(1, int(position.total_shares * sell_frac)) if sell_frac < 1.0 else position.total_shares
                         sell_shares = min(sell_shares, position.total_shares)

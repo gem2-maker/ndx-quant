@@ -4,6 +4,8 @@ import os
 import json
 import hashlib
 import time
+import tempfile
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 
@@ -28,8 +30,16 @@ class DataFetcher:
     def __init__(self, cache_dir: str = DATA_DIR, use_sqlite: bool = True):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(exist_ok=True)
+        if yf is not None:
+            # Keep yfinance's own sqlite caches in a temp directory that is writable here.
+            yf_cache_dir = Path(tempfile.gettempdir()) / "ndx-quant-yf"
+            yf_cache_dir.mkdir(parents=True, exist_ok=True)
+            yf.set_tz_cache_location(str(yf_cache_dir))
         self.use_sqlite = use_sqlite
-        self._db_cache = DataCache() if use_sqlite else None
+        try:
+            self._db_cache = DataCache() if use_sqlite else None
+        except sqlite3.OperationalError:
+            self._db_cache = None
 
     def _cache_path(self, ticker: str, period: str, interval: str) -> Path:
         key = hashlib.md5(f"{ticker}_{period}_{interval}".encode()).hexdigest()[:12]

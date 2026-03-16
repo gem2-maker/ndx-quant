@@ -5,6 +5,9 @@ from strategies.mean_reversion import MeanReversionStrategy
 from strategies.rsi_macd import RsiMacdStrategy
 from strategies.ml_signal import MLSignalStrategy
 from strategies.livermore_v3 import LivermoreV3Strategy, LivermoreV3Engine
+from strategies.trend_following import TrendFollowingStrategy, TrendFollowingEngine
+from strategies.trend_following_v3 import TrendFollowingV3, TrendFollowingV3Engine
+from strategies.quick_trade import QuickTradeStrategy, QuickTradeEngine
 
 STRATEGIES = {
     "momentum": MomentumStrategy,
@@ -13,6 +16,9 @@ STRATEGIES = {
     "rsi_macd": RsiMacdStrategy,
     "ml_signal": MLSignalStrategy,
     "livermore_v3": LivermoreV3Strategy,
+    "trend_following": TrendFollowingStrategy,
+    "trend_following_v3": TrendFollowingV3,
+    "quick_trade": QuickTradeStrategy,
 }
 
 

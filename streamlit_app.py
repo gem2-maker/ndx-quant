@@ -82,7 +82,7 @@ def compute_backtest(
     retrain: int,
     n_estimators: int,
     max_depth: int,
-) -> tuple[BacktestResult, object]:
+) -> tuple[BacktestResult | dict, object]:
     kwargs = {}
     if strategy_name == "ml_signal":
         kwargs.update(
@@ -96,18 +96,27 @@ def compute_backtest(
         )
 
     strategy = get_strategy(strategy_name, **kwargs)
+    if strategy_name == "trend_following_v3":
+        from strategies.trend_following_v3 import TrendFollowingV3Engine
+
+        engine = TrendFollowingV3Engine(strategy=strategy, initial_capital=initial_capital)
+        return engine.run(df, ticker=ticker), strategy
+
     engine = BacktestEngine(strategy=strategy, initial_capital=initial_capital)
     return engine.run(df, ticker=ticker), strategy
 
 
-def summarize_backtest(result: BacktestResult) -> dict[str, float]:
-    metrics = result.metrics.copy()
-    metrics["sharpe"] = metrics["sharpe_ratio"]
-    metrics["commission"] = metrics["total_commission"]
+def summarize_backtest(result: BacktestResult | dict) -> dict[str, float]:
+    metrics = result["metrics"].copy() if isinstance(result, dict) else result.metrics.copy()
+    metrics["sharpe"] = metrics.get("sharpe_ratio", 0.0)
+    metrics["commission"] = metrics.get("total_commission", 0.0)
     return metrics
 
 
-def build_trade_frame(result: BacktestResult) -> pd.DataFrame:
+def build_trade_frame(result: BacktestResult | dict) -> pd.DataFrame:
+    if isinstance(result, dict):
+        return pd.DataFrame(result.get("trades", []))
+
     records = [
         {
             "entry_date": trade.entry_date,
@@ -171,9 +180,27 @@ def plot_price_panel(df: pd.DataFrame, ticker: str) -> plt.Figure:
     return fig
 
 
-def plot_equity_panel(result: BacktestResult, ticker: str, df: pd.DataFrame) -> plt.Figure:
-    visualizer = BacktestVisualizer()
+def plot_equity_panel(result: BacktestResult | dict, ticker: str, df: pd.DataFrame) -> plt.Figure:
     fig, axes = plt.subplots(2, 1, figsize=(12, 7), sharex=True, gridspec_kw={"height_ratios": [3, 1]})
+
+    if isinstance(result, dict):
+        equity_curve = result["equity_curve"]
+        drawdown = (equity_curve / equity_curve.cummax()) - 1
+        buy_hold = (df["Close"] / df["Close"].iloc[0]) * equity_curve.iloc[0]
+
+        axes[0].plot(equity_curve.index, equity_curve.values, label="Strategy", color="#1f77b4", linewidth=1.8)
+        axes[0].plot(buy_hold.index, buy_hold.values, label="Buy & Hold", color="#7f7f7f", linestyle="--", linewidth=1.0)
+        axes[0].set_title(f"{ticker} Equity Curve")
+        axes[0].legend(loc="upper left")
+        axes[0].grid(alpha=0.2)
+
+        axes[1].fill_between(drawdown.index, drawdown.values, 0, color="#d62728", alpha=0.35)
+        axes[1].set_title("Drawdown")
+        axes[1].grid(alpha=0.2)
+        fig.tight_layout()
+        return fig
+
+    visualizer = BacktestVisualizer()
     visualizer._plot_equity_curve(axes[0], result, ticker, df)
     visualizer._plot_drawdown(axes[1], result)
     fig.tight_layout()
@@ -274,10 +301,10 @@ def render_backtest_tab(df: pd.DataFrame, controls: dict[str, object]) -> None:
     cols[4].metric("Win rate", format_pct(summary["win_rate"]))
 
     detail_cols = st.columns(5)
-    detail_cols[0].metric("Profit factor", f"{summary['profit_factor']:.2f}")
-    detail_cols[1].metric("Expectancy", f"${summary['expectancy']:,.0f}")
-    detail_cols[2].metric("Avg trade", f"${summary['average_trade_pnl']:,.0f}")
-    detail_cols[3].metric("Avg hold", f"{summary['average_hold_days']:.1f}d")
+    detail_cols[0].metric("Profit factor", f"{summary.get('profit_factor', 0.0):.2f}")
+    detail_cols[1].metric("Expectancy", f"${summary.get('expectancy', 0.0):,.0f}")
+    detail_cols[2].metric("Avg trade", f"${summary.get('average_trade_pnl', 0.0):,.0f}")
+    detail_cols[3].metric("Avg hold", f"{summary.get('average_hold_days', 0.0):.1f}d")
     detail_cols[4].metric("Exposure", format_pct(summary["exposure_ratio"]))
 
     st.pyplot(plot_equity_panel(result, controls["ticker"], df), use_container_width=True)
@@ -286,12 +313,18 @@ def render_backtest_tab(df: pd.DataFrame, controls: dict[str, object]) -> None:
     info_col, trade_col = st.columns([1, 2])
     with info_col:
         st.markdown(f"**Strategy:** `{strategy.name}`")
-        st.markdown(f"**Buy trades:** `{summary['buy_trades']}`")
-        st.markdown(f"**Sell trades:** `{summary['sell_trades']}`")
-        st.markdown(f"**Completed trades:** `{summary['completed_trades']}`")
+        st.markdown(f"**Buy trades:** `{summary.get('buy_trades', summary.get('total_buys', 0))}`")
+        st.markdown(f"**Sell trades:** `{summary.get('sell_trades', summary.get('total_sells', 0))}`")
+        st.markdown(f"**Completed trades:** `{summary.get('completed_trades', summary.get('round_trips', 0))}`")
         st.markdown(f"**Commission paid:** `${summary['commission']:,.2f}`")
-        st.markdown(f"**Best / Worst trade:** `${summary['best_trade']:,.0f}` / `${summary['worst_trade']:,.0f}`")
-        st.markdown(f"**Consecutive wins / losses:** `{summary['max_consecutive_wins']}` / `{summary['max_consecutive_losses']}`")
+        st.markdown(
+            f"**Best / Worst trade:** "
+            f"`${summary.get('best_trade', 0.0):,.0f}` / `${summary.get('worst_trade', 0.0):,.0f}`"
+        )
+        st.markdown(
+            f"**Consecutive wins / losses:** "
+            f"`{summary.get('max_consecutive_wins', 0)}` / `{summary.get('max_consecutive_losses', 0)}`"
+        )
         if hasattr(strategy, "training_info"):
             st.json(strategy.training_info)
     with trade_col:
