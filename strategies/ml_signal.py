@@ -38,6 +38,9 @@ class MLSignalStrategy(BaseStrategy):
         n_estimators: int = 200,
         max_depth: int = 6,
         train_period_ratio: float = 0.3,
+        min_probability_edge: float = 0.08,
+        trend_filter: bool = True,
+        volatility_limit: float = 0.04,
     ):
         super().__init__(name=f"ML_{model_type}")
         self.model_type = model_type
@@ -48,6 +51,9 @@ class MLSignalStrategy(BaseStrategy):
         self.n_estimators = n_estimators
         self.max_depth = max_depth
         self.train_period_ratio = train_period_ratio
+        self.min_probability_edge = min_probability_edge
+        self.trend_filter = trend_filter
+        self.volatility_limit = volatility_limit
 
         self._predictor: TrendPredictor | None = None
         self._trained = False
@@ -99,7 +105,7 @@ class MLSignalStrategy(BaseStrategy):
         # Check cache first
         if idx in self._prediction_cache:
             pred, prob, conf = self._prediction_cache[idx]
-            if self._should_trade(conf):
+            if self._should_trade(conf, prob, df, idx, pred):
                 return Signal.BUY if pred == 1 else Signal.SELL
             return Signal.HOLD
 
@@ -136,16 +142,46 @@ class MLSignalStrategy(BaseStrategy):
             # Cache it
             self._prediction_cache[idx] = (prediction, prob_up, confidence)
 
-            if self._should_trade(confidence):
+            if self._should_trade(confidence, prob_up, df, idx, prediction):
                 return Signal.BUY if prediction == 1 else Signal.SELL
             return Signal.HOLD
 
         except Exception:
             return Signal.HOLD
 
-    def _should_trade(self, confidence: str) -> bool:
-        """Check if confidence meets threshold."""
-        return self._confidence_order.get(confidence, 0) >= self._confidence_order.get(self.confidence_threshold, 0)
+    def _should_trade(self, confidence: str, prob_up: float, df: pd.DataFrame, idx: int, prediction: int) -> bool:
+        """Check if model confidence + market regime filters allow a trade."""
+        confidence_ok = self._confidence_order.get(confidence, 0) >= self._confidence_order.get(self.confidence_threshold, 0)
+        edge_ok = abs(prob_up - 0.5) >= self.min_probability_edge
+        volatility_ok = self._volatility_ok(df, idx)
+        trend_ok = self._trend_ok(df, idx, prediction)
+        return confidence_ok and edge_ok and volatility_ok and trend_ok
+
+    def _volatility_ok(self, df: pd.DataFrame, idx: int) -> bool:
+        """Skip trades when short-term volatility is unusually high."""
+        if idx < self.lookback + 5:
+            return False
+        returns = df["Close"].pct_change().iloc[max(0, idx - self.lookback):idx]
+        if returns.empty:
+            return False
+        return float(returns.std()) <= self.volatility_limit
+
+    def _trend_ok(self, df: pd.DataFrame, idx: int, prediction: int) -> bool:
+        """Align BUY/SELL decision with medium-term trend regime."""
+        if not self.trend_filter:
+            return True
+        if idx < 200:
+            return False
+
+        close = df["Close"]
+        sma50 = float(close.iloc[max(0, idx - 49):idx + 1].mean())
+        sma200 = float(close.iloc[max(0, idx - 199):idx + 1].mean())
+        price = float(close.iloc[idx])
+
+        # BUY only in bullish regime, SELL only in bearish regime.
+        if prediction == 1:
+            return price >= sma50 and sma50 >= sma200
+        return price <= sma50 and sma50 <= sma200
 
     def get_stop_loss(self, entry_price: float) -> float:
         """ML strategy uses tighter stop loss (3%)."""
@@ -166,4 +202,7 @@ class MLSignalStrategy(BaseStrategy):
             "features": len(self._predictor.feature_names),
             "last_retrain_at_bar": self._last_retrain_idx,
             "cached_predictions": len(self._prediction_cache),
+            "min_probability_edge": self.min_probability_edge,
+            "trend_filter": self.trend_filter,
+            "volatility_limit": self.volatility_limit,
         }
