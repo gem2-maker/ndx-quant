@@ -248,5 +248,9 @@ class BaseStrategy(ABC):
         from config import TAKE_PROFIT_PCT
         return entry_price * (1 + TAKE_PROFIT_PCT)
 
+    def position_size_multiplier(self, df: pd.DataFrame, idx: int) -> float:
+        """Optional dynamic position sizing hook (scale factor on max_position_pct)."""
+        return 1.0
+
     def __repr__(self) -> str:
         return f"<{self.name}>"

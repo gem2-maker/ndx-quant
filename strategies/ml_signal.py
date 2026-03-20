@@ -40,6 +40,7 @@ class MLSignalStrategy(BaseStrategy):
         train_period_ratio: float = 0.3,
         min_probability_edge: float = 0.08,
         trend_filter: bool = True,
+        momentum_filter: bool = True,
         volatility_limit: float = 0.04,
     ):
         super().__init__(name=f"ML_{model_type}")
@@ -53,6 +54,7 @@ class MLSignalStrategy(BaseStrategy):
         self.train_period_ratio = train_period_ratio
         self.min_probability_edge = min_probability_edge
         self.trend_filter = trend_filter
+        self.momentum_filter = momentum_filter
         self.volatility_limit = volatility_limit
 
         self._predictor: TrendPredictor | None = None
@@ -106,14 +108,16 @@ class MLSignalStrategy(BaseStrategy):
         if idx in self._prediction_cache:
             pred, prob, conf = self._prediction_cache[idx]
             if self._should_trade(conf, prob, df, idx, pred):
-                return Signal.BUY if pred == 1 else Signal.SELL
-            return Signal.HOLD
+                if pred == 1:
+                    return Signal.BUY
+                return Signal.SELL if self._allow_short(df, idx) else Signal.HOLD
+            return self._fallback_signal(df, idx)
 
         # Train model if needed
         self._ensure_trained(df, idx)
 
         if not self._trained:
-            return Signal.HOLD
+            return self._fallback_signal(df, idx)
 
         # Get prediction for current bar
         try:
@@ -143,8 +147,10 @@ class MLSignalStrategy(BaseStrategy):
             self._prediction_cache[idx] = (prediction, prob_up, confidence)
 
             if self._should_trade(confidence, prob_up, df, idx, prediction):
-                return Signal.BUY if prediction == 1 else Signal.SELL
-            return Signal.HOLD
+                if prediction == 1:
+                    return Signal.BUY
+                return Signal.SELL if self._allow_short(df, idx) else Signal.HOLD
+            return self._fallback_signal(df, idx)
 
         except Exception:
             return Signal.HOLD
@@ -155,7 +161,50 @@ class MLSignalStrategy(BaseStrategy):
         edge_ok = abs(prob_up - 0.5) >= self.min_probability_edge
         volatility_ok = self._volatility_ok(df, idx)
         trend_ok = self._trend_ok(df, idx, prediction)
-        return confidence_ok and edge_ok and volatility_ok and trend_ok
+        momentum_ok = self._momentum_ok(df, idx, prediction)
+        return confidence_ok and edge_ok and volatility_ok and trend_ok and momentum_ok
+
+    def position_size_multiplier(self, df: pd.DataFrame, idx: int) -> float:
+        """Dynamic sizing from ML edge + trend strength + volatility regime."""
+        if idx < 200:
+            return 0.0
+
+        close = df["Close"]
+        price = float(close.iloc[idx])
+        sma50 = float(close.iloc[max(0, idx - 49):idx + 1].mean())
+        sma200 = float(close.iloc[max(0, idx - 199):idx + 1].mean())
+
+        # Trend strength: distance from SMA200 normalized by recent volatility.
+        returns = close.pct_change().iloc[max(0, idx - 30):idx]
+        vol = float(returns.std()) if not returns.empty else 0.0
+        if vol <= 1e-9:
+            trend_strength = 0.0
+        else:
+            trend_strength = min(abs((price / sma200) - 1.0) / (2.0 * vol), 1.0)
+
+        # Volatility penalty: scale down in noisier markets.
+        vol_penalty = 1.0
+        if self.volatility_limit > 0 and vol > 0:
+            vol_penalty = min(self.volatility_limit / vol, 1.0)
+
+        cached = self._prediction_cache.get(idx)
+        if cached is None:
+            # Fallback trend sizing when ML has no actionable edge yet.
+            bullish = price >= sma50 >= sma200
+            base = 7.0 if bullish else 0.0
+            return max(0.0, min(base * vol_penalty, 10.0))
+
+        prediction, prob_up, _ = cached
+        edge = min(abs(prob_up - 0.5) / 0.5, 1.0)  # 0~1
+        direction_ok = (prediction == 1 and price >= sma50 >= sma200) or (prediction == 0 and price <= sma50 <= sma200)
+        if not direction_ok:
+            return 0.0
+
+        score = 0.55 * edge + 0.45 * trend_strength
+        # Convert confidence score to leverage of base cap (10% base * multiplier).
+        # Typical range 3~10 => 30%~100% notional exposure.
+        sized = 3.0 + 7.0 * score
+        return max(1.0, min(sized * vol_penalty, 10.0))
 
     def _volatility_ok(self, df: pd.DataFrame, idx: int) -> bool:
         """Skip trades when short-term volatility is unusually high."""
@@ -183,13 +232,61 @@ class MLSignalStrategy(BaseStrategy):
             return price >= sma50 and sma50 >= sma200
         return price <= sma50 and sma50 <= sma200
 
+    def _momentum_ok(self, df: pd.DataFrame, idx: int, prediction: int) -> bool:
+        """Second opinion from RSI+MACD to reduce whipsaw trades."""
+        if not self.momentum_filter:
+            return True
+        if idx < 35:
+            return False
+
+        row = df.iloc[idx]
+        rsi = float(row.get("RSI", np.nan))
+        macd = float(row.get("MACD", np.nan))
+        macd_signal = float(row.get("MACD_Signal", np.nan))
+
+        if np.isnan(rsi) or np.isnan(macd) or np.isnan(macd_signal):
+            return False
+
+        if prediction == 1:
+            return (rsi >= 50.0) and (macd >= macd_signal)
+        return (rsi <= 45.0) and (macd <= macd_signal)
+
+    def _allow_short(self, df: pd.DataFrame, idx: int) -> bool:
+        """Only allow short exits in clearly bearish regimes."""
+        if idx < 200:
+            return False
+        close = df["Close"]
+        price = float(close.iloc[idx])
+        sma200 = float(close.iloc[max(0, idx - 199):idx + 1].mean())
+        rsi = float(df.iloc[idx].get("RSI", np.nan))
+        return price < sma200 * 0.985 and (not np.isnan(rsi) and rsi < 45.0)
+
+    def _fallback_signal(self, df: pd.DataFrame, idx: int) -> Signal:
+        """Trend-following fallback when ML edge is weak (strategy fusion)."""
+        if idx < 200:
+            return Signal.HOLD
+        close = df["Close"]
+        price = float(close.iloc[idx])
+        sma50 = float(close.iloc[max(0, idx - 49):idx + 1].mean())
+        sma200 = float(close.iloc[max(0, idx - 199):idx + 1].mean())
+        rsi = float(df.iloc[idx].get("RSI", np.nan))
+
+        bullish = price >= sma50 >= sma200 and (np.isnan(rsi) or rsi >= 50)
+        bearish = price <= sma50 <= sma200 and (not np.isnan(rsi) and rsi <= 45)
+
+        if bullish:
+            return Signal.BUY
+        if bearish:
+            return Signal.SELL if self._allow_short(df, idx) else Signal.HOLD
+        return Signal.HOLD
+
     def get_stop_loss(self, entry_price: float) -> float:
-        """ML strategy uses tighter stop loss (3%)."""
-        return entry_price * 0.97
+        """Wider protective stop for trend-following behavior."""
+        return entry_price * 0.90
 
     def get_take_profit(self, entry_price: float) -> float:
-        """ML strategy uses tighter take profit (10%)."""
-        return entry_price * 1.10
+        """Let winners run; only cap very extended moves."""
+        return entry_price * 1.35
 
     @property
     def training_info(self) -> dict:
@@ -204,5 +301,6 @@ class MLSignalStrategy(BaseStrategy):
             "cached_predictions": len(self._prediction_cache),
             "min_probability_edge": self.min_probability_edge,
             "trend_filter": self.trend_filter,
+            "momentum_filter": self.momentum_filter,
             "volatility_limit": self.volatility_limit,
         }

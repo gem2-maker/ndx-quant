@@ -124,8 +124,11 @@ class BacktestEngine:
 
             # Execute trades
             if signal == Signal.BUY and position is None:
-                # Calculate position size
-                max_value = cash * self.max_position_pct
+                # Calculate position size (supports strategy-level dynamic sizing)
+                size_mult = self.strategy.position_size_multiplier(df, i)
+                # Allow strategy to scale base cap (e.g., 0.0~10.0 where 10x on 10% cap = 100% notional).
+                size_mult = max(0.0, min(float(size_mult), 10.0))
+                max_value = cash * self.max_position_pct * size_mult
                 buy_price = close * (1 + self.slippage)
                 shares = int(max_value / buy_price)
                 if shares > 0:
